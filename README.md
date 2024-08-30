@@ -1,3 +1,3 @@
-#Unofficial Zed Editor Windows Build
+# Unofficial Zed Editor Windows Build
 
 This repository serves as a straightforward GitHub workflow that is designed to build the Zed application from the main branch. It automatically generates and publishes a new release every night at UTC+0000, ensuring that the latest version is readily available on a daily basis. In addition to this nightly build process, the workflow is also triggered on push events, which allows for testing purposes and ensures that any recent changes can be evaluated promptly. For further information, including features and updates, please visit the Zed homepage or check out the official repository where comprehensive details can be found.

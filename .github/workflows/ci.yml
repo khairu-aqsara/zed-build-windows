@@ -1,0 +1,149 @@
+name: CI
+run-name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag to build'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  checks:
+    name: "Run checks"
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.check_input.outputs.ref }}
+    steps:
+      - name: Check input
+        id: check_input
+        run: |
+          if [[ -z "${{ github.event.inputs.ref }}" ]]; then
+            echo "No input provided, fetching latest Zed published version"
+            latest_zed="$(curl -sL https://api.github.com/repos/zed-industries/zed/releases | jq -r '.[0].tag_name')"
+            echo "ref=${latest_zed}" >> $GITHUB_OUTPUT
+          else
+            echo "ref=${{ github.event.inputs.ref }}" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    name: "Build Zed"
+    runs-on: windows-latest
+    needs: [checks]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+            path: own
+
+      - name: Checkout Zed
+        uses: actions/checkout@v4
+        with:
+            repository: zed-industries/zed
+            ref: ${{ needs.checks.outputs.ref }}
+            path: zed
+
+      - name: Check LongPathsEnabled first
+        run: |
+          (Get-ItemProperty "HKLM:System\CurrentControlSet\Control\FileSystem").LongPathsEnabled
+
+      - name: Enable long paths in Windows
+        shell: powershell
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --global core.longpaths true
+
+      - name: Check LongPathsEnabled after
+        run: |
+          (Get-ItemProperty "HKLM:System\CurrentControlSet\Control\FileSystem").LongPathsEnabled
+
+      - name: Extract toolchain channel
+        id: extract_toolchain
+        working-directory: ${{ github.workspace }}\zed
+        shell: bash
+        run: |
+            TOOLCHAIN_CHANNEL=$(grep 'channel' rust-toolchain.toml | cut -d '"' -f 2)
+            echo "Toolchain channel: $TOOLCHAIN_CHANNEL"
+            echo "TOOLCHAIN_CHANNEL=$TOOLCHAIN_CHANNEL" >> $GITHUB_OUTPUT
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+            toolchain: ${{ steps.extract_toolchain.outputs.TOOLCHAIN_CHANNEL }}
+            target: "wasm32-wasip1"
+            components: "rustfmt, clippy"
+
+      - name: Show Rust toolchain info
+        run: |
+            rustc --version
+            rustup show
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
+        with:
+            msbuild-architecture: x64
+
+      - name: Install Windows 10 SDK
+        uses: GuillaumeFalourd/setup-windows10-sdk-action@v2
+        with:
+            sdk-version: 22000
+
+      - name: Build project
+        working-directory: ${{ github.workspace }}\zed
+        shell: pwsh
+        # zed may be set to run the exe after the build, this
+        # won't work in an headless environment. The build at this
+        # point is likely to have completed successfully.
+        continue-on-error: true
+        run: |
+            cargo run --release
+
+      - name: Show build artifacts
+        working-directory: ${{ github.workspace }}/zed
+        shell: bash
+        run: |
+            ls -la target/release
+
+      - name: Check build artifacts
+        working-directory: ${{ github.workspace }}/zed
+        shell: bash
+        run: |
+            if [ ! -f ./target/release/zed.exe ]; then
+                echo "zed.exe not found. Build likely to have failed."
+                exit 1
+            fi
+            
+      - name: Compress build artifacts
+        working-directory: ${{ github.workspace }}\zed\target\release
+        shell: pwsh
+        run: |
+          Compress-Archive -Path zed.exe -Destination zed.zip
+          Compress-Archive -Path zed.pdb -Destination zed.pdb.zip
+
+      - name: Calculate SHA256 checksum
+        working-directory: ${{ github.workspace }}/zed/target/release
+        shell: bash
+        run: |
+            sha256sum zed.exe > zed.exe.sha256
+            sha256sum zed.zip > zed.zip.sha256
+            sha256sum zed.pdb.zip > zed.pdb.zip.sha256
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        id: artifact-upload-step
+        with:
+          name: zed
+          path: |
+            ./zed/target/release/zed.zip
+            ./zed/target/release/zed.exe.sha256
+            ./zed/target/release/zed.zip.sha256
+            ./zed/target/release/zed.pdb.zip
+            ./zed/target/release/zed.pdb.zip.sha256
+          if-no-files-found: error
+
+      - name: Output artifact ID
+        run:  echo 'Artifact ID is ${{ steps.artifact-upload-step.outputs.artifact-id }}'
